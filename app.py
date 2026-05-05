@@ -86,6 +86,166 @@ def load_file(uploaded_file):
         return None
 
 
+def generate_ai_summary(df):
+    insights = []
+    rows, cols = df.shape
+    insights.append(f"Your dataset has **{rows:,} rows** and **{cols} columns**.")
+
+    missing = df.isnull().sum().sum()
+    if missing > 0:
+        pct = round((missing / (rows * cols)) * 100, 1)
+        insights.append(f"There are **{missing:,} missing values** ({pct}% of your data). You may want to review or clean these.")
+    else:
+        insights.append("Your data has **no missing values** — great data quality!")
+
+    numeric_cols = df.select_dtypes(include=np.number).columns.tolist()
+    text_cols = df.select_dtypes(include="object").columns.tolist()
+
+    if numeric_cols:
+        insights.append(f"Found **{len(numeric_cols)} numeric column(s)**: {', '.join(numeric_cols)}.")
+
+        for col in numeric_cols:
+            series = df[col].dropna()
+            if len(series) == 0:
+                continue
+            mean_val = series.mean()
+            std_val = series.std()
+            min_val = series.min()
+            max_val = series.max()
+            skew = series.skew()
+
+            insights.append(
+                f"**{col}** ranges from {round(min_val, 2)} to {round(max_val, 2)}, "
+                f"with an average of {round(mean_val, 2)}."
+            )
+
+            if abs(skew) > 1:
+                direction = "right (positively)" if skew > 0 else "left (negatively)"
+                insights.append(
+                    f"**{col}** is skewed {direction}, meaning most values are concentrated on one side."
+                )
+
+            outlier_threshold = 3
+            z_scores = np.abs((series - mean_val) / std_val) if std_val > 0 else pd.Series([0] * len(series))
+            outliers = (z_scores > outlier_threshold).sum()
+            if outliers > 0:
+                insights.append(
+                    f"**{col}** has **{outliers} potential outlier(s)** — values that are unusually high or low compared to the rest."
+                )
+
+        if len(numeric_cols) >= 2:
+            corr_matrix = df[numeric_cols].corr()
+            strong_pairs = []
+            for i in range(len(numeric_cols)):
+                for j in range(i + 1, len(numeric_cols)):
+                    val = corr_matrix.iloc[i, j]
+                    if abs(val) >= 0.7:
+                        direction = "positively" if val > 0 else "negatively"
+                        strong_pairs.append(
+                            f"**{numeric_cols[i]}** and **{numeric_cols[j]}** are strongly {direction} correlated ({round(val, 2)})"
+                        )
+            if strong_pairs:
+                insights.append("Strong relationships found: " + "; ".join(strong_pairs) + ".")
+            else:
+                insights.append("No strong correlations found between numeric columns.")
+
+    if text_cols:
+        insights.append(f"Found **{len(text_cols)} text column(s)**: {', '.join(text_cols)}.")
+        for col in text_cols:
+            n_unique = df[col].nunique()
+            top_val = df[col].value_counts().idxmax() if not df[col].dropna().empty else "N/A"
+            top_count = df[col].value_counts().max() if not df[col].dropna().empty else 0
+            insights.append(
+                f"**{col}** has {n_unique} unique values. The most common is **'{top_val}'** "
+                f"(appears {top_count} times)."
+            )
+
+    duplicates = df.duplicated().sum()
+    if duplicates > 0:
+        insights.append(f"Found **{duplicates} duplicate row(s)** in your data. Consider removing them for cleaner analysis.")
+    else:
+        insights.append("No duplicate rows found.")
+
+    return insights
+
+
+def recommend_charts(df):
+    numeric_cols = df.select_dtypes(include=np.number).columns.tolist()
+    text_cols = df.select_dtypes(include="object").columns.tolist()
+    recommendations = []
+
+    if len(numeric_cols) >= 2:
+        corr = df[numeric_cols].corr()
+        for i in range(len(numeric_cols)):
+            for j in range(i + 1, len(numeric_cols)):
+                val = abs(corr.iloc[i, j])
+                if val >= 0.5:
+                    recommendations.append({
+                        "chart": "Scatter Plot",
+                        "reason": f"**{numeric_cols[i]}** and **{numeric_cols[j]}** are related (correlation: {round(val, 2)}). A scatter plot will show this relationship clearly.",
+                        "x": numeric_cols[i],
+                        "y": numeric_cols[j],
+                        "type": "scatter"
+                    })
+
+    for col in numeric_cols:
+        series = df[col].dropna()
+        if len(series) == 0:
+            continue
+        skew = abs(series.skew())
+        if skew > 0.5:
+            recommendations.append({
+                "chart": "Histogram",
+                "reason": f"**{col}** has an uneven distribution (skew: {round(skew, 2)}). A histogram will show how values are spread out.",
+                "col": col,
+                "type": "histogram"
+            })
+
+    for col in text_cols:
+        n_unique = df[col].nunique()
+        if 2 <= n_unique <= 15:
+            if numeric_cols:
+                recommendations.append({
+                    "chart": "Bar Chart",
+                    "reason": f"**{col}** has {n_unique} categories. A bar chart is perfect for comparing values across these groups.",
+                    "x": col,
+                    "y": numeric_cols[0],
+                    "type": "bar"
+                })
+            recommendations.append({
+                "chart": "Pie Chart",
+                "reason": f"**{col}** has {n_unique} categories. A pie chart will show the share of each category.",
+                "col": col,
+                "type": "pie"
+            })
+
+    for col in numeric_cols:
+        series = df[col].dropna()
+        if len(series) == 0:
+            continue
+        std_val = series.std()
+        mean_val = series.mean()
+        cv = (std_val / mean_val) if mean_val != 0 else 0
+        if abs(cv) > 0.5:
+            recommendations.append({
+                "chart": "Box Plot",
+                "reason": f"**{col}** has high variability. A box plot will reveal the spread, median, and any outliers.",
+                "col": col,
+                "type": "box"
+            })
+
+    if not recommendations and numeric_cols:
+        recommendations.append({
+            "chart": "Bar Chart",
+            "reason": f"A simple bar chart works well to compare **{numeric_cols[0]}** across your data.",
+            "x": df.columns[0],
+            "y": numeric_cols[0],
+            "type": "bar"
+        })
+
+    return recommendations[:5]
+
+
 uploaded_file = st.file_uploader(
     "Upload your file here",
     type=SUPPORTED_TYPES,
@@ -100,17 +260,34 @@ if uploaded_file is not None:
         df.columns = [str(c).strip() for c in df.columns]
         df = df.replace("", np.nan)
 
-        st.success(f"File loaded successfully — {df.shape[0]} rows and {df.shape[1]} columns")
+        st.success(f"File loaded successfully — {df.shape[0]:,} rows and {df.shape[1]} columns")
 
-        tab1, tab2, tab3, tab4, tab5 = st.tabs([
-            "📋 Data Preview", "📈 Statistics", "📊 Charts", "🔍 Filter & Search", "⬇️ Download"
+        tab0, tab1, tab2, tab3, tab4, tab5 = st.tabs([
+            "🤖 AI Summary", "📋 Data Preview", "📈 Statistics", "📊 Charts & Recommendations", "🔍 Filter & Search", "⬇️ Download"
         ])
+
+        with tab0:
+            st.subheader("🤖 AI-Powered Data Summary")
+            st.markdown("Here is what the AI found in your data:")
+            with st.spinner("Analyzing your data..."):
+                insights = generate_ai_summary(df)
+            for i, insight in enumerate(insights):
+                st.markdown(f"- {insight}")
+
+            numeric_cols = df.select_dtypes(include=np.number).columns.tolist()
+            if len(numeric_cols) >= 2:
+                st.markdown("---")
+                st.subheader("Correlation Heatmap")
+                corr = df[numeric_cols].corr().round(2)
+                fig = px.imshow(corr, text_auto=True, color_continuous_scale="Blues",
+                                title="How strongly columns relate to each other")
+                st.plotly_chart(fig, use_container_width=True)
 
         with tab1:
             st.subheader("Data Preview")
             rows = st.slider("Rows to display", 5, min(500, len(df)), min(20, len(df)))
             st.dataframe(df.head(rows), use_container_width=True)
-            st.caption(f"Showing {rows} of {len(df)} total rows")
+            st.caption(f"Showing {rows} of {len(df):,} total rows")
 
             st.subheader("Column Info")
             info = pd.DataFrame({
@@ -129,8 +306,8 @@ if uploaded_file is not None:
                 st.dataframe(df[numeric_cols].describe().round(2), use_container_width=True)
 
                 st.subheader("Column Highlights")
-                col1, col2, col3 = st.columns(3)
                 chosen = st.selectbox("Pick a numeric column", numeric_cols)
+                col1, col2, col3 = st.columns(3)
                 col1.metric("Min", round(df[chosen].min(), 2))
                 col2.metric("Max", round(df[chosen].max(), 2))
                 col3.metric("Average", round(df[chosen].mean(), 2))
@@ -146,7 +323,44 @@ if uploaded_file is not None:
                 st.dataframe(counts, use_container_width=True)
 
         with tab3:
-            st.subheader("Charts & Visualizations")
+            st.subheader("📊 Charts & Visualizations")
+
+            st.markdown("### 💡 Recommended Charts for Your Data")
+            recs = recommend_charts(df)
+            if recs:
+                for idx, rec in enumerate(recs):
+                    with st.expander(f"Recommendation {idx + 1}: {rec['chart']} — click to view"):
+                        st.markdown(rec["reason"])
+                        try:
+                            if rec["type"] == "scatter":
+                                fig = px.scatter(df, x=rec["x"], y=rec["y"],
+                                                 title=f"{rec['x']} vs {rec['y']}")
+                                st.plotly_chart(fig, use_container_width=True)
+                            elif rec["type"] == "histogram":
+                                fig = px.histogram(df, x=rec["col"], nbins=30,
+                                                   title=f"Distribution of {rec['col']}")
+                                st.plotly_chart(fig, use_container_width=True)
+                            elif rec["type"] == "bar":
+                                fig = px.bar(df, x=rec["x"], y=rec["y"],
+                                             title=f"{rec['y']} by {rec['x']}")
+                                st.plotly_chart(fig, use_container_width=True)
+                            elif rec["type"] == "pie":
+                                counts = df[rec["col"]].value_counts().reset_index()
+                                counts.columns = [rec["col"], "Count"]
+                                fig = px.pie(counts, names=rec["col"], values="Count",
+                                             title=f"Share of {rec['col']}")
+                                st.plotly_chart(fig, use_container_width=True)
+                            elif rec["type"] == "box":
+                                fig = px.box(df, y=rec["col"],
+                                             title=f"Spread of {rec['col']}")
+                                st.plotly_chart(fig, use_container_width=True)
+                        except Exception:
+                            st.info("Could not render this chart with your data.")
+            else:
+                st.info("No specific chart recommendations for this data. Use the manual section below.")
+
+            st.markdown("---")
+            st.markdown("### 🛠️ Build Your Own Chart")
             numeric_cols = df.select_dtypes(include=np.number).columns.tolist()
             all_cols = df.columns.tolist()
 
@@ -220,7 +434,7 @@ if uploaded_file is not None:
                         (filtered[range_col] <= range_vals[1])
                     ]
 
-            st.write(f"Showing **{len(filtered)}** matching rows")
+            st.write(f"Showing **{len(filtered):,}** matching rows")
             st.dataframe(filtered, use_container_width=True)
 
         with tab5:
@@ -247,6 +461,7 @@ else:
     st.info("👆 Upload a file above to get started. Supported formats: CSV, Excel, PDF, JSON, TSV, TXT")
     st.markdown("""
     ### What this tool can do:
+    - **🤖 AI Summary** — auto-detects patterns, outliers, correlations and missing data
     - **Preview** your data in a clean table
     - **Analyze** statistics like min, max, average, and value counts
     - **Visualize** with bar charts, line charts, scatter plots, pie charts, histograms, and box plots
